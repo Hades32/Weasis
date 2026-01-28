@@ -97,6 +97,15 @@ public class CurvedMprImageIO implements DcmMediaReader {
 
   /**
    * Generate the panoramic image by sampling along the curve.
+   * 
+   * <p>For a dental panoramic, we create a view where:
+   * <ul>
+   *   <li>Horizontal axis = distance along the curve (following the dental arch)</li>
+   *   <li>Vertical axis = Z direction (superior-inferior, showing tooth height)</li>
+   * </ul>
+   * 
+   * <p>At each (curve_position, z_level), we sample with a slab thickness perpendicular
+   * to the curve and take the maximum intensity to capture the full tooth cross-section.
    */
   private PlanarImage generatePanoramicImage() {
     List<Vector3d> curvePoints = axis.getCurvePoints3D();
@@ -122,65 +131,147 @@ public class CurvedMprImageIO implements DcmMediaReader {
       return null;
     }
 
+    // Compute perpendicular directions at each sampled point (for slab thickness)
+    List<Vector3d> perpDirs = computePerpendicularDirections(sampledPoints, planeNormal);
+
     LOGGER.info("sampledPoints count: {}", sampledPoints.size());
     if (!sampledPoints.isEmpty()) {
       LOGGER.info("First sampled point: {}", sampledPoints.get(0));
       LOGGER.info("Last sampled point: {}", sampledPoints.get(sampledPoints.size() - 1));
+      LOGGER.info("First perpendicular dir: {}", perpDirs.get(0));
     }
 
     int widthPx = sampledPoints.size();
+    
+    // Height = Z extent to sample (widthMm controls vertical extent of panoramic)
     int heightPx = (int) Math.round(widthMm / pixelMm);
     if (heightPx < 1) heightPx = 1;
-
-    LOGGER.info("Output image: {}x{}", widthPx, heightPx);
+    
+    // Slab thickness perpendicular to curve for MIP (in voxels)
+    // Use a reasonable thickness to capture full tooth cross-section
+    double slabThicknessMm = 20.0; // 20mm slab thickness
+    int slabSamples = (int) Math.max(1, Math.round(slabThicknessMm / pixelMm));
+    
+    LOGGER.info("Output image: {}x{} (Z extent={}mm, slab={}mm, {} samples)", 
+        widthPx, heightPx, widthMm, slabThicknessMm, slabSamples);
 
     int cvType = volume.getCVType();
     ImageCV dst = new ImageCV(heightPx, widthPx, cvType);
 
-    // The sampling direction for the panoramic "height" should be ALONG the plane normal,
-    // not perpendicular to it. For example, in axial view (normal = Z), we want to sample
-    // up/down through the volume to see tooth roots.
-    Vector3d samplingDir = new Vector3d(planeNormal);
-    if (samplingDir.lengthSquared() < 1e-10) {
-      samplingDir.set(0, 0, 1); // Default to Z if no normal provided
-    } else {
-      samplingDir.normalize();
+    // Get the reference Z level from curve (use average Z of curve points)
+    double refZ = 0;
+    for (Vector3d p : sampledPoints) {
+      refZ += p.z;
     }
+    refZ /= sampledPoints.size();
+    LOGGER.info("Reference Z level: {}", refZ);
 
+    // For each point along the curve, sample along Z with MIP perpendicular to curve
+    // This creates a panoramic view showing tooth cross-sections
     for (int i = 0; i < widthPx; i++) {
       Vector3d P = sampledPoints.get(i);
+      Vector3d perpDir = perpDirs.get(i);
 
       for (int j = 0; j < heightPx; j++) {
-        double offsetMm = (j - heightPx / 2.0) * pixelMm;
-        Vector3d offsetVox = new Vector3d(samplingDir).mul(offsetMm / pixelMm);
-        Vector3d samplePoint = new Vector3d(P).add(offsetVox);
-        Number value = volume.getInterpolatedValueFromSource(
-            samplePoint.x, samplePoint.y, samplePoint.z);
-        if (value != null) {
-          setPixelValue(dst, j, i, value, cvType);
+        // Z offset from reference (vertical axis of panoramic)
+        double zOffset = (j - heightPx / 2.0);
+        double sampleZ = refZ + zOffset;
+        
+        // Max intensity projection across the slab thickness perpendicular to curve
+        double maxValue = Double.NEGATIVE_INFINITY;
+        for (int k = 0; k < slabSamples; k++) {
+          double perpOffset = (k - slabSamples / 2.0);
+          double sampleX = P.x + perpDir.x * perpOffset;
+          double sampleY = P.y + perpDir.y * perpOffset;
+          
+          Number value = volume.getInterpolatedValueFromSource(sampleX, sampleY, sampleZ);
+          if (value != null && value.doubleValue() > maxValue) {
+            maxValue = value.doubleValue();
+          }
+        }
+        
+        if (maxValue > Double.NEGATIVE_INFINITY) {
+          setPixelValue(dst, j, i, maxValue, cvType);
         }
       }
     }
+    
+    LOGGER.info("Generated panoramic with Z sampling and perpendicular MIP slab");
 
     setDicomTags(widthPx, heightPx, pixelMm, stepMm);
     return dst;
   }
 
+  /**
+   * Compute the perpendicular direction to the curve tangent at each point.
+   * The perpendicular is computed in the plane defined by planeNormal (typically XY plane).
+   * This direction is used for the slab thickness in MIP.
+   * 
+   * @param sampledPoints the resampled curve points
+   * @param planeNormal the normal of the source plane (e.g., Z for axial)
+   * @return list of unit perpendicular directions at each point
+   */
+  private List<Vector3d> computePerpendicularDirections(
+      List<Vector3d> sampledPoints, Vector3d planeNormal) {
+    List<Vector3d> perpDirs = new ArrayList<>();
+    int n = sampledPoints.size();
+    
+    for (int i = 0; i < n; i++) {
+      Vector3d tangent;
+      if (i == 0) {
+        // Forward difference at start
+        tangent = new Vector3d(sampledPoints.get(1)).sub(sampledPoints.get(0));
+      } else if (i == n - 1) {
+        // Backward difference at end
+        tangent = new Vector3d(sampledPoints.get(n - 1)).sub(sampledPoints.get(n - 2));
+      } else {
+        // Central difference in the middle
+        tangent = new Vector3d(sampledPoints.get(i + 1)).sub(sampledPoints.get(i - 1));
+      }
+      
+      // Compute perpendicular in the plane: perp = planeNormal × tangent
+      // This gives a vector perpendicular to both the tangent and the plane normal,
+      // which lies in the plane and points "inward/outward" from the curve
+      Vector3d perp = new Vector3d(planeNormal).cross(tangent);
+      
+      if (perp.lengthSquared() > 1e-10) {
+        perp.normalize();
+      } else {
+        // Fallback if tangent is parallel to planeNormal (shouldn't happen for axial curves)
+        perp = new Vector3d(1, 0, 0);
+      }
+      
+      perpDirs.add(perp);
+    }
+    
+    return perpDirs;
+  }
+
+  /**
+   * Resample the curve to have evenly-spaced points.
+   * Points are in voxel coordinates. We resample at 1-voxel intervals.
+   */
   private List<Vector3d> resampleCurve(List<Vector3d> points, double stepMm, double pixelMm) {
     List<Vector3d> result = new ArrayList<>();
     if (points.size() < 2) return result;
 
-    double totalLength = 0;
+    // Calculate total length in voxels
+    double totalLengthVoxels = 0;
     for (int i = 1; i < points.size(); i++) {
-      totalLength += points.get(i).distance(points.get(i - 1)) * pixelMm;
+      totalLengthVoxels += points.get(i).distance(points.get(i - 1));
     }
 
-    if (totalLength <= 0) return result;
+    if (totalLengthVoxels <= 0) return result;
 
-    int numSamples = (int) Math.ceil(totalLength / stepMm);
+    // Resample at 1-voxel step intervals for smooth output
+    double stepVoxels = 1.0;
+    int numSamples = (int) Math.ceil(totalLengthVoxels / stepVoxels);
+    
+    LOGGER.info("Resampling: totalLength={} voxels, numSamples={}", totalLengthVoxels, numSamples);
+    
     for (int i = 0; i <= numSamples; i++) {
-      double targetDist = i * stepMm;
-      Vector3d point = interpolateAlongCurve(points, targetDist, pixelMm);
+      double targetDist = i * stepVoxels;
+      Vector3d point = interpolateAlongCurve(points, targetDist);
       if (point != null) {
         result.add(point);
       }
@@ -188,43 +279,23 @@ public class CurvedMprImageIO implements DcmMediaReader {
     return result;
   }
 
-  private Vector3d interpolateAlongCurve(List<Vector3d> points, double targetDistMm, double pixelMm) {
+  /**
+   * Interpolate along the curve to find the point at a given distance (in voxels).
+   */
+  private Vector3d interpolateAlongCurve(List<Vector3d> points, double targetDistVoxels) {
     double accumulated = 0;
     for (int i = 1; i < points.size(); i++) {
       Vector3d p0 = points.get(i - 1);
       Vector3d p1 = points.get(i);
-      double segmentLength = p0.distance(p1) * pixelMm;
-      if (accumulated + segmentLength >= targetDistMm) {
-        double remaining = targetDistMm - accumulated;
+      double segmentLength = p0.distance(p1);
+      if (accumulated + segmentLength >= targetDistVoxels) {
+        double remaining = targetDistVoxels - accumulated;
         double t = segmentLength > 0 ? remaining / segmentLength : 0;
         return new Vector3d(p0).lerp(p1, t);
       }
       accumulated += segmentLength;
     }
     return points.isEmpty() ? null : new Vector3d(points.get(points.size() - 1));
-  }
-
-  private Vector3d computeTangent(List<Vector3d> points, int index) {
-    Vector3d tangent = new Vector3d();
-    if (points.size() < 2) {
-      tangent.set(1, 0, 0);
-      return tangent;
-    }
-
-    if (index == 0) {
-      points.get(1).sub(points.get(0), tangent);
-    } else if (index >= points.size() - 1) {
-      points.get(points.size() - 1).sub(points.get(points.size() - 2), tangent);
-    } else {
-      points.get(index + 1).sub(points.get(index - 1), tangent);
-    }
-
-    if (tangent.lengthSquared() > 1e-10) {
-      tangent.normalize();
-    } else {
-      tangent.set(1, 0, 0);
-    }
-    return tangent;
   }
 
   private void setPixelValue(ImageCV dst, int row, int col, Number value, int cvType) {

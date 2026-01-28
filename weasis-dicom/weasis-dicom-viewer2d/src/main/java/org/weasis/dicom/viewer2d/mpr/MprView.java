@@ -239,18 +239,47 @@ public class MprView extends View2d implements SliceCanvas {
     if (mprController.getVolume() == null) {
       return null;
     }
-    int size = mprController.getVolume().getSliceSize();
+    Volume<?> volume = mprController.getVolume();
+    int size = volume.getSliceSize();
+    Vector3i volSize = volume.getSize();
+    
+    // Normalize image coordinates to 0-1 range
     double normalizedX = imgX / size;
     double normalizedY = imgY / size;
-    Vector3d crossHair = mprController.getAxesControl().getCenterForCanvas(this);
-    // Get normalized coordinates (0-1 range) after transformation
-    Vector3d normalized = getVolumeCoordinates(new Vector3d(normalizedX, normalizedY, crossHair.z));
-    // Scale to actual volume dimensions (not cubic texture size)
-    Vector3i volSize = mprController.getVolume().getSize();
-    return new Point3(
-        normalized.x * volSize.x,
-        normalized.y * volSize.y,
-        normalized.z * volSize.z);
+    
+    // Get the raw center position (not canvas-transformed) for the depth axis
+    Vector3d rawCenter = mprController.getAxesControl().getCenter();
+    
+    // For each plane type, map image X/Y and depth appropriately to volume coordinates
+    // The depth (which slice we're viewing) comes from the plane's axis in the raw center
+    double voxelX, voxelY, voxelZ;
+    switch (plane) {
+      case AXIAL -> {
+        // Axial: image X->volume X, image Y->volume Y, depth->volume Z
+        voxelX = normalizedX * volSize.x;
+        voxelY = normalizedY * volSize.y;
+        voxelZ = rawCenter.z * volSize.z;
+      }
+      case CORONAL -> {
+        // Coronal: image X->volume X, image Y->volume Z, depth->volume Y
+        voxelX = normalizedX * volSize.x;
+        voxelZ = normalizedY * volSize.z;
+        voxelY = rawCenter.y * volSize.y;
+      }
+      case SAGITTAL -> {
+        // Sagittal: image X->volume Y, image Y->volume Z, depth->volume X
+        voxelY = normalizedX * volSize.y;
+        voxelZ = normalizedY * volSize.z;
+        voxelX = rawCenter.x * volSize.x;
+      }
+      default -> {
+        voxelX = normalizedX * volSize.x;
+        voxelY = normalizedY * volSize.y;
+        voxelZ = rawCenter.z * volSize.z;
+      }
+    }
+    
+    return new Point3(voxelX, voxelY, voxelZ);
   }
 
   public Vector3d getVolumeCoordinates(Vector3d planePosition) {

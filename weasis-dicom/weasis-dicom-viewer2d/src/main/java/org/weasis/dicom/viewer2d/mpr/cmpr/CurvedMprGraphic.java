@@ -71,7 +71,9 @@ public class CurvedMprGraphic extends PolylineGraphic {
 
     for (Point2D pt : pts) {
       if (pt != null) {
-        Point3 volCoord = mprView.getVolumeCoordinatesFromMouse((int) pt.getX(), (int) pt.getY());
+        // Use getVolumeCoordinatesFromImage since graphic points are in image space,
+        // not mouse/screen coordinates. This returns actual voxel coordinates.
+        Point3 volCoord = mprView.getVolumeCoordinatesFromImage(pt.getX(), pt.getY());
         if (volCoord != null) {
           points3D.add(new Vector3d(volCoord.x, volCoord.y, volCoord.z));
         }
