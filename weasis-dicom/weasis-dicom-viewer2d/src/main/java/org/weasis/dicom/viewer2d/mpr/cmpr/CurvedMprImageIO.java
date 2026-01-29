@@ -14,6 +14,7 @@ import java.lang.ref.Reference;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -126,10 +127,17 @@ public class CurvedMprImageIO implements DcmMediaReader {
     LOGGER.info("planeNormal: {}", planeNormal);
     LOGGER.info("volume size: {}x{}x{}", volume.getSize().x, volume.getSize().y, volume.getSize().z);
 
-    List<Vector3d> sampledPoints = resampleCurve(curvePoints, stepMm, pixelMm);
+    // Smooth the curve using Catmull-Rom spline interpolation to eliminate
+    // sharp corners from rough user input
+    List<Vector3d> smoothedPoints = smoothCurveWithSpline(curvePoints);
+    
+    List<Vector3d> sampledPoints = resampleCurve(smoothedPoints, stepMm, pixelMm);
     if (sampledPoints.isEmpty()) {
       return null;
     }
+    
+    // Reverse for dentist view (patient's right on viewer's left)
+    Collections.reverse(sampledPoints);
 
     // Compute perpendicular directions at each sampled point (for slab thickness)
     List<Vector3d> perpDirs = computePerpendicularDirections(sampledPoints, planeNormal);
@@ -245,6 +253,73 @@ public class CurvedMprImageIO implements DcmMediaReader {
     }
     
     return perpDirs;
+  }
+
+  /**
+   * Smooth the curve using Catmull-Rom spline interpolation.
+   * This converts rough user-drawn polylines into smooth curves.
+   * 
+   * @param points the original control points
+   * @return smoothed curve with many more points
+   */
+  private List<Vector3d> smoothCurveWithSpline(List<Vector3d> points) {
+    if (points.size() < 2) return new ArrayList<>(points);
+    if (points.size() == 2) return new ArrayList<>(points);
+    
+    List<Vector3d> result = new ArrayList<>();
+    
+    // Number of interpolated points between each pair of control points
+    int segmentSamples = 20;
+    
+    for (int i = 0; i < points.size() - 1; i++) {
+      // Get 4 control points for Catmull-Rom (with clamping at endpoints)
+      Vector3d p0 = points.get(Math.max(0, i - 1));
+      Vector3d p1 = points.get(i);
+      Vector3d p2 = points.get(i + 1);
+      Vector3d p3 = points.get(Math.min(points.size() - 1, i + 2));
+      
+      // Generate points along this segment
+      for (int j = 0; j < segmentSamples; j++) {
+        double t = (double) j / segmentSamples;
+        Vector3d interpolated = catmullRom(p0, p1, p2, p3, t);
+        result.add(interpolated);
+      }
+    }
+    
+    // Add the last point
+    result.add(new Vector3d(points.get(points.size() - 1)));
+    
+    LOGGER.info("Smoothed curve: {} input points -> {} output points", 
+        points.size(), result.size());
+    
+    return result;
+  }
+  
+  /**
+   * Catmull-Rom spline interpolation between p1 and p2.
+   * 
+   * @param p0 control point before p1
+   * @param p1 start point of segment
+   * @param p2 end point of segment  
+   * @param p3 control point after p2
+   * @param t interpolation parameter [0, 1]
+   * @return interpolated point
+   */
+  private Vector3d catmullRom(Vector3d p0, Vector3d p1, Vector3d p2, Vector3d p3, double t) {
+    double t2 = t * t;
+    double t3 = t2 * t;
+    
+    // Catmull-Rom basis functions
+    double b0 = -0.5 * t3 + t2 - 0.5 * t;
+    double b1 = 1.5 * t3 - 2.5 * t2 + 1.0;
+    double b2 = -1.5 * t3 + 2.0 * t2 + 0.5 * t;
+    double b3 = 0.5 * t3 - 0.5 * t2;
+    
+    return new Vector3d(
+        b0 * p0.x + b1 * p1.x + b2 * p2.x + b3 * p3.x,
+        b0 * p0.y + b1 * p1.y + b2 * p2.y + b3 * p3.y,
+        b0 * p0.z + b1 * p1.z + b2 * p2.z + b3 * p3.z
+    );
   }
 
   /**
