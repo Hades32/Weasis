@@ -509,6 +509,11 @@ public class MprView extends View2d implements SliceCanvas {
     
     int sliceSize = vol.getSliceSize();
     Vector3i volSize = vol.getSize();
+    Vector3d voxelRatio = vol.getVoxelRatio();
+    
+    // Centering offsets: the volume is centered in the sliceSize×sliceSize image
+    double offsetX = (sliceSize - volSize.x * voxelRatio.x) / 2.0;
+    double offsetY = (sliceSize - volSize.y * voxelRatio.y) / 2.0;
     
     java.awt.Stroke oldStroke = g2d.getStroke();
     java.awt.Color oldColor = g2d.getColor();
@@ -517,8 +522,8 @@ public class MprView extends View2d implements SliceCanvas {
     g2d.setColor(Color.RED);
     g2d.setStroke(new java.awt.BasicStroke(2f));
     for (Vector3d pt : debug.originalPoints) {
-      double imgX = (pt.x / volSize.x) * sliceSize;
-      double imgY = (pt.y / volSize.y) * sliceSize;
+      double imgX = pt.x * voxelRatio.x + offsetX;
+      double imgY = pt.y * voxelRatio.y + offsetY;
       Point2D screenPt = getImageCoordinatesToScreen(imgX, imgY);
       int r = 6;
       g2d.drawOval((int)screenPt.getX() - r, (int)screenPt.getY() - r, r*2, r*2);
@@ -529,8 +534,8 @@ public class MprView extends View2d implements SliceCanvas {
     g2d.setStroke(new java.awt.BasicStroke(1.5f));
     Point2D prevPt = null;
     for (Vector3d pt : debug.smoothedPoints) {
-      double imgX = (pt.x / volSize.x) * sliceSize;
-      double imgY = (pt.y / volSize.y) * sliceSize;
+      double imgX = pt.x * voxelRatio.x + offsetX;
+      double imgY = pt.y * voxelRatio.y + offsetY;
       Point2D screenPt = getImageCoordinatesToScreen(imgX, imgY);
       if (prevPt != null) {
         g2d.drawLine((int)prevPt.getX(), (int)prevPt.getY(), 
@@ -557,10 +562,10 @@ public class MprView extends View2d implements SliceCanvas {
       Vector3d p2 = new Vector3d(pt).sub(new Vector3d(dir).mul(halfSlabVoxels));
       
       // Convert to image coordinates
-      double img1X = (p1.x / volSize.x) * sliceSize;
-      double img1Y = (p1.y / volSize.y) * sliceSize;
-      double img2X = (p2.x / volSize.x) * sliceSize;
-      double img2Y = (p2.y / volSize.y) * sliceSize;
+      double img1X = p1.x * voxelRatio.x + offsetX;
+      double img1Y = p1.y * voxelRatio.y + offsetY;
+      double img2X = p2.x * voxelRatio.x + offsetX;
+      double img2Y = p2.y * voxelRatio.y + offsetY;
       
       Point2D screen1 = getImageCoordinatesToScreen(img1X, img1Y);
       Point2D screen2 = getImageCoordinatesToScreen(img2X, img2Y);

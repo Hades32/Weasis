@@ -173,7 +173,7 @@ public class CurvedMprImageIO implements DcmMediaReader {
         sampledPoints, axis.getPlaneNormal());
     
     // Slab thickness (in mm) for MIP along the perpendicular direction
-    double slabThicknessMm = 20.0;
+    double slabThicknessMm = 10.0;
     int slabSamples = (int) Math.max(1, Math.round(slabThicknessMm / pixelMm));
     
     // Vertical extent: height in Z direction (in mm)
